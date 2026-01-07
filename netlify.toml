@@ -1,0 +1,25 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NETLIFY_NEXT_PLUGIN_SKIP = "true"
+  NODE_VERSION = "18"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# Handle Next.js routing
+[[redirects]]
+  from = "/*"
+  to = "/.netlify/functions/nextjs"
+  status = 200
+
+# Handle API routes
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/nextjs"
+  status = 200

@@ -1128,7 +1128,7 @@ export default function Home() {
                 )}
               </button>
             ) : (
-              <div className="flex items-center space-x-1 sm:space-x-2 w-full max-w-2xl px-2 sm:px-0">
+              <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 w-full max-w-2xl px-2 sm:px-0">
                 {/* Hidden file inputs */}
                 <input
                   ref={fileInputRef}
@@ -1208,13 +1208,13 @@ export default function Home() {
                       sendTextMessage();
                     }
                   }}
-                  className="flex-1 min-w-0 bg-[#2d3748] border border-[#4a5568] rounded-lg px-3 sm:px-4 py-3 text-sm text-white placeholder-[#a0aec0] focus:outline-none focus:ring-2 focus:ring-[#00d4ff] focus:border-transparent"
+                  className="w-full sm:flex-1 sm:w-auto min-w-0 bg-[#2d3748] border border-[#4a5568] rounded-lg px-3 sm:px-4 py-3 text-sm text-white placeholder-[#a0aec0] focus:outline-none focus:ring-2 focus:ring-[#00d4ff] focus:border-transparent order-last sm:order-none"
                   placeholder="Ask anything..."
                 />
                 <button
                   onClick={sendTextMessage}
                   disabled={isSendingText || !textInput.trim()}
-                  className="px-3 sm:px-6 py-3 bg-[#00d4ff] hover:bg-[#00b8e6] text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                  className="px-4 sm:px-6 py-3 bg-[#00d4ff] hover:bg-[#00b8e6] text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 order-last sm:order-none"
                 >
                   {isSendingText ? "..." : "Send"}
                 </button>

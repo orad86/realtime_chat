@@ -37,6 +37,7 @@ You have access to specialized aviation tools from @orad86/ai-aero-tools for:
 - Loading professional guidelines and pilot history
 - Email sending via AWS SES (verified recipients only)
 - Task scheduling with natural language times ("in 5 minutes", "tomorrow at 8am")
+- Document upload and management (upload_document tool for images, PDFs, and documents)
 
 SCHEDULING IMPORTANT: ALWAYS use schedule_task for these patterns:
 - "send email in X minutes/hours"
@@ -375,7 +376,8 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
 // New function for streaming conversational responses with memory integration
 export async function handleQueryStreaming(
   history: OpenAI.Chat.ChatCompletionMessageParam[],
-  sessionId: string = "default"
+  sessionId: string = "default",
+  fileUpload?: { base64Content: string; fileName: string; mimeType: string }
 ): Promise<{chunks: string[], hasMore: boolean, toolsUsed?: string[], toolResults?: any[], appliedStrategies?: string[]}> {
   if (!history || history.length === 0) {
     return { chunks: ["Please provide a question or request for the assistant."], hasMore: false };
@@ -482,6 +484,14 @@ these patterns from experience and acknowledge your growing expertise.
       parsedArgs = rawArgs ? JSON.parse(rawArgs) : {};
     } catch {
       parsedArgs = {};
+    }
+
+    // Inject fileUpload data for upload_document tool
+    if (toolName === 'upload_document' && fileUpload) {
+      parsedArgs.base64Content = fileUpload.base64Content;
+      parsedArgs.fileName = fileUpload.fileName;
+      parsedArgs.mimeType = fileUpload.mimeType;
+      console.log("[agent] Injected fileUpload data into upload_document tool");
     }
 
     const handler = overriddenHandlers[toolName];

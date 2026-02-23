@@ -24,6 +24,10 @@ export default function Home() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [textInput, setTextInput] = useState("");
   const [isSendingText, setIsSendingText] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [showUploadMenu, setShowUploadMenu] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const [inputMode, setInputMode] = useState<"voice" | "text">("voice");
   const [isThinking, setIsThinking] = useState(false);
   const [pendingChunks, setPendingChunks] = useState<string[]>([]);
@@ -403,6 +407,82 @@ export default function Home() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, currentTranscript]);
+
+  // Function to handle file upload
+  const handleFileUpload = async (file: File) => {
+    if (!file) return;
+    
+    setIsUploading(true);
+    setShowUploadMenu(false);
+    setStatus("Uploading...");
+    
+    try {
+      // Convert file to base64
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          // Remove data URL prefix (e.g., "data:image/png;base64,")
+          const base64Data = result.split(',')[1];
+          resolve(base64Data);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      
+      // Add user message about the upload
+      addMessage("user", `📎 Uploading: ${file.name}`);
+      
+      // Send to API with upload request
+      const response = await fetch('/api/gpt', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: `Upload this file: ${file.name}`,
+          streaming: true,
+          fileUpload: {
+            base64Content: base64,
+            fileName: file.name,
+            mimeType: file.type,
+          }
+        }),
+        credentials: 'include',
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      const firstChunk = handleStreamingChunks(data.chunks || [data.result], data.hasMore);
+      addMessage("assistant", firstChunk, data.toolsUsed || [], data.toolResults || []);
+      setStatus('Connected');
+      
+      if (data.sessionId) {
+        setSessionId(data.sessionId);
+      }
+      
+      speakResponse(firstChunk);
+    } catch (error) {
+      const errorMessage = `Upload failed: ${error instanceof Error ? error.message : String(error)}`;
+      addMessage("assistant", errorMessage);
+      setStatus('Error');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+  
+  // Handle file input change
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      handleFileUpload(file);
+    }
+    // Reset input so same file can be selected again
+    e.target.value = '';
+  };
 
   // Function to send a typed text message to the assistant
   const sendTextMessage = async () => {
@@ -1048,7 +1128,76 @@ export default function Home() {
                 )}
               </button>
             ) : (
-              <div className="flex items-center space-x-2 max-w-2xl w-full">
+              <div className="flex items-center space-x-1 sm:space-x-2 w-full max-w-2xl px-2 sm:px-0">
+                {/* Hidden file inputs */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*,application/pdf,.doc,.docx,.txt"
+                  onChange={handleFileInputChange}
+                  className="hidden"
+                />
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleFileInputChange}
+                  className="hidden"
+                />
+                
+                {/* Upload button with dropdown */}
+                <div className="relative flex-shrink-0">
+                  <button
+                    onClick={() => setShowUploadMenu(!showUploadMenu)}
+                    disabled={isUploading}
+                    className="p-2 sm:p-3 bg-[#2d3748] hover:bg-[#4a5568] text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-[#4a5568]"
+                    title="Upload file"
+                  >
+                    {isUploading ? (
+                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                      </svg>
+                    )}
+                  </button>
+                  
+                  {/* Upload menu dropdown */}
+                  {showUploadMenu && (
+                    <div className="absolute bottom-full left-0 mb-2 bg-[#2d3748] border border-[#4a5568] rounded-lg shadow-lg overflow-hidden min-w-[160px]">
+                      <button
+                        onClick={() => {
+                          cameraInputRef.current?.click();
+                          setShowUploadMenu(false);
+                        }}
+                        className="w-full px-4 py-3 text-left text-sm text-white hover:bg-[#4a5568] flex items-center gap-2"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        Take Photo
+                      </button>
+                      <button
+                        onClick={() => {
+                          fileInputRef.current?.click();
+                          setShowUploadMenu(false);
+                        }}
+                        className="w-full px-4 py-3 text-left text-sm text-white hover:bg-[#4a5568] flex items-center gap-2 border-t border-[#4a5568]"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        Choose File
+                      </button>
+                    </div>
+                  )}
+                </div>
+                
                 <input
                   type="text"
                   value={textInput}
@@ -1059,13 +1208,13 @@ export default function Home() {
                       sendTextMessage();
                     }
                   }}
-                  className="flex-1 bg-[#2d3748] border border-[#4a5568] rounded-lg px-4 py-3 text-sm text-white placeholder-[#a0aec0] focus:outline-none focus:ring-2 focus:ring-[#00d4ff] focus:border-transparent"
-                  placeholder="Ask about aviation weather, NOTAMs, routes..."
+                  className="flex-1 min-w-0 bg-[#2d3748] border border-[#4a5568] rounded-lg px-3 sm:px-4 py-3 text-sm text-white placeholder-[#a0aec0] focus:outline-none focus:ring-2 focus:ring-[#00d4ff] focus:border-transparent"
+                  placeholder="Ask anything..."
                 />
                 <button
                   onClick={sendTextMessage}
                   disabled={isSendingText || !textInput.trim()}
-                  className="px-6 py-3 bg-[#00d4ff] hover:bg-[#00b8e6] text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-3 sm:px-6 py-3 bg-[#00d4ff] hover:bg-[#00b8e6] text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                 >
                   {isSendingText ? "..." : "Send"}
                 </button>

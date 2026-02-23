@@ -863,7 +863,7 @@ export default function Home() {
               <svg className="w-12 h-12 mb-4 text-[#4a5568]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
               </svg>
-              <h2 className="text-xl font-semibold text-white mb-2">Aviation AI Assistant</h2>
+              <h2 className="text-xl font-semibold text-white mb-2">Flight Deck Assistant</h2>
               <p className="text-[#a0aec0] mb-6 max-w-md">Ready to help with flight planning, weather, NOTAMs, routes, and more.</p>
             </div>
           ) : (
@@ -1047,32 +1047,89 @@ export default function Home() {
 
         {/* Compact Input Bar */}
         <div className="bg-[#1a1f2e] border-t border-[#2d3748] p-3">
-          <div className="flex items-center justify-center space-x-4">
-            {/* Mode Toggle */}
-            <div className="flex items-center bg-[#2d3748] rounded-lg p-1">
-              <button
-                onClick={() => setInputMode("voice")}
-                className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
-                  inputMode === "voice" 
-                    ? "bg-[#00d4ff] text-white" 
-                    : "text-[#a0aec0] hover:text-white"
-                }`}
-              >
-                🎤 Voice
-              </button>
-              <button
-                onClick={() => setInputMode("text")}
-                className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
-                  inputMode === "text" 
-                    ? "bg-[#00d4ff] text-white" 
-                    : "text-[#a0aec0] hover:text-white"
-                }`}
-              >
-                ⌨️ Text
-              </button>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4">
+            {/* First row on mobile: Mode Toggle + Upload Button */}
+            <div className="flex items-center gap-3 w-full sm:w-auto justify-center">
+              {/* Mode Toggle */}
+              <div className="flex items-center bg-[#2d3748] rounded-lg p-1">
+                <button
+                  onClick={() => setInputMode("voice")}
+                  className={`px-3 sm:px-4 py-2 rounded text-sm font-medium transition-colors ${
+                    inputMode === "voice" 
+                      ? "bg-[#00d4ff] text-white" 
+                      : "text-[#a0aec0] hover:text-white"
+                  }`}
+                >
+                  🎤 Voice
+                </button>
+                <button
+                  onClick={() => setInputMode("text")}
+                  className={`px-3 sm:px-4 py-2 rounded text-sm font-medium transition-colors ${
+                    inputMode === "text" 
+                      ? "bg-[#00d4ff] text-white" 
+                      : "text-[#a0aec0] hover:text-white"
+                  }`}
+                >
+                  ⌨️ Text
+                </button>
+              </div>
+              
+              {/* Upload button - mobile only (shown in first row) */}
+              {inputMode === "text" && (
+                <div className="relative sm:hidden">
+                  <button
+                    onClick={() => setShowUploadMenu(!showUploadMenu)}
+                    disabled={isUploading}
+                    className="p-3 bg-[#2d3748] hover:bg-[#4a5568] text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-[#4a5568]"
+                    title="Upload file"
+                  >
+                    {isUploading ? (
+                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                      </svg>
+                    )}
+                  </button>
+                  
+                  {/* Upload menu dropdown - mobile */}
+                  {showUploadMenu && (
+                    <div className="absolute bottom-full left-0 mb-2 bg-[#2d3748] border border-[#4a5568] rounded-lg shadow-lg overflow-hidden min-w-[160px] z-10">
+                      <button
+                        onClick={() => {
+                          cameraInputRef.current?.click();
+                          setShowUploadMenu(false);
+                        }}
+                        className="w-full px-4 py-3 text-left text-sm text-white hover:bg-[#4a5568] flex items-center gap-2"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        Take Photo
+                      </button>
+                      <button
+                        onClick={() => {
+                          fileInputRef.current?.click();
+                          setShowUploadMenu(false);
+                        }}
+                        className="w-full px-4 py-3 text-left text-sm text-white hover:bg-[#4a5568] flex items-center gap-2 border-t border-[#4a5568]"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        Choose File
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* Input Controls */}
+            {/* Input Controls - Second row on mobile */}
             {inputMode === "voice" ? (
               <button
                 onClick={() => {
@@ -1128,7 +1185,7 @@ export default function Home() {
                 )}
               </button>
             ) : (
-              <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 w-full max-w-2xl px-2 sm:px-0">
+              <div className="flex gap-2 w-full max-w-2xl px-2 sm:px-0">
                 {/* Hidden file inputs */}
                 <input
                   ref={fileInputRef}
@@ -1146,79 +1203,79 @@ export default function Home() {
                   className="hidden"
                 />
                 
-                {/* Upload button with dropdown */}
-                <div className="relative flex-shrink-0">
-                  <button
-                    onClick={() => setShowUploadMenu(!showUploadMenu)}
-                    disabled={isUploading}
-                    className="p-2 sm:p-3 bg-[#2d3748] hover:bg-[#4a5568] text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-[#4a5568]"
-                    title="Upload file"
-                  >
-                    {isUploading ? (
-                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                    ) : (
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                      </svg>
+                {/* Upload button - desktop only */}
+                <div className="relative hidden sm:block flex-shrink-0">
+                    <button
+                      onClick={() => setShowUploadMenu(!showUploadMenu)}
+                      disabled={isUploading}
+                      className="p-3 bg-[#2d3748] hover:bg-[#4a5568] text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-[#4a5568]"
+                      title="Upload file"
+                    >
+                      {isUploading ? (
+                        <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                      ) : (
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                        </svg>
+                      )}
+                    </button>
+                    
+                    {/* Upload menu dropdown - desktop */}
+                    {showUploadMenu && (
+                      <div className="absolute bottom-full left-0 mb-2 bg-[#2d3748] border border-[#4a5568] rounded-lg shadow-lg overflow-hidden min-w-[160px] z-10">
+                        <button
+                          onClick={() => {
+                            cameraInputRef.current?.click();
+                            setShowUploadMenu(false);
+                          }}
+                          className="w-full px-4 py-3 text-left text-sm text-white hover:bg-[#4a5568] flex items-center gap-2"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                          </svg>
+                          Take Photo
+                        </button>
+                        <button
+                          onClick={() => {
+                            fileInputRef.current?.click();
+                            setShowUploadMenu(false);
+                          }}
+                          className="w-full px-4 py-3 text-left text-sm text-white hover:bg-[#4a5568] flex items-center gap-2 border-t border-[#4a5568]"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          Choose File
+                        </button>
+                      </div>
                     )}
-                  </button>
+                  </div>
                   
-                  {/* Upload menu dropdown */}
-                  {showUploadMenu && (
-                    <div className="absolute bottom-full left-0 mb-2 bg-[#2d3748] border border-[#4a5568] rounded-lg shadow-lg overflow-hidden min-w-[160px]">
-                      <button
-                        onClick={() => {
-                          cameraInputRef.current?.click();
-                          setShowUploadMenu(false);
-                        }}
-                        className="w-full px-4 py-3 text-left text-sm text-white hover:bg-[#4a5568] flex items-center gap-2"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                        </svg>
-                        Take Photo
-                      </button>
-                      <button
-                        onClick={() => {
-                          fileInputRef.current?.click();
-                          setShowUploadMenu(false);
-                        }}
-                        className="w-full px-4 py-3 text-left text-sm text-white hover:bg-[#4a5568] flex items-center gap-2 border-t border-[#4a5568]"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
-                        Choose File
-                      </button>
-                    </div>
-                  )}
+                  <input
+                    type="text"
+                    value={textInput}
+                    onChange={(e) => setTextInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        sendTextMessage();
+                      }
+                    }}
+                    className="flex-1 min-w-0 bg-[#2d3748] border border-[#4a5568] rounded-lg px-4 py-3 text-sm text-white placeholder-[#a0aec0] focus:outline-none focus:ring-2 focus:ring-[#00d4ff] focus:border-transparent"
+                    placeholder="Ask anything..."
+                  />
+                  <button
+                    onClick={sendTextMessage}
+                    disabled={isSendingText || !textInput.trim()}
+                    className="px-6 py-3 bg-[#00d4ff] hover:bg-[#00b8e6] text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                  >
+                    {isSendingText ? "..." : "Send"}
+                  </button>
                 </div>
-                
-                <input
-                  type="text"
-                  value={textInput}
-                  onChange={(e) => setTextInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      sendTextMessage();
-                    }
-                  }}
-                  className="w-full sm:flex-1 sm:w-auto min-w-0 bg-[#2d3748] border border-[#4a5568] rounded-lg px-3 sm:px-4 py-3 text-sm text-white placeholder-[#a0aec0] focus:outline-none focus:ring-2 focus:ring-[#00d4ff] focus:border-transparent order-last sm:order-none"
-                  placeholder="Ask anything..."
-                />
-                <button
-                  onClick={sendTextMessage}
-                  disabled={isSendingText || !textInput.trim()}
-                  className="px-4 sm:px-6 py-3 bg-[#00d4ff] hover:bg-[#00b8e6] text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 order-last sm:order-none"
-                >
-                  {isSendingText ? "..." : "Send"}
-                </button>
-              </div>
             )}
           </div>
         </div>

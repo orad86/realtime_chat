@@ -1,7 +1,35 @@
 <svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <rect width="512" height="512" fill="#0a0e1a"/>
-  <circle cx="256" cy="256" r="200" fill="#00d4ff" opacity="0.1"/>
-  <path d="M256 100 L356 200 L356 350 L256 412 L156 350 L156 200 Z" fill="#00d4ff" stroke="#00d4ff" stroke-width="4"/>
-  <circle cx="256" cy="256" r="40" fill="#ffffff"/>
-  <path d="M256 180 L256 220 M256 292 L256 332 M180 256 L220 256 M292 256 L332 256" stroke="#ffffff" stroke-width="8" stroke-linecap="round"/>
+  <!-- Background -->
+  <rect width="512" height="512" rx="80" fill="#0a0e1a"/>
+  
+  <!-- Outer glow ring -->
+  <circle cx="256" cy="256" r="200" fill="none" stroke="#00d4ff" stroke-width="3" opacity="0.3"/>
+  
+  <!-- Airplane silhouette -->
+  <g transform="translate(256, 256)">
+    <!-- Fuselage -->
+    <path d="M0 -120 L0 80" stroke="#00d4ff" stroke-width="16" stroke-linecap="round"/>
+    <!-- Wings -->
+    <path d="M-100 20 L100 20" stroke="#00d4ff" stroke-width="12" stroke-linecap="round"/>
+    <!-- Tail -->
+    <path d="M-40 70 L40 70" stroke="#00d4ff" stroke-width="10" stroke-linecap="round"/>
+    <!-- Nose -->
+    <circle cx="0" cy="-120" r="12" fill="#00d4ff"/>
+  </g>
+  
+  <!-- HUD crosshairs -->
+  <g stroke="#ffffff" stroke-width="4" opacity="0.8">
+    <!-- Center dot -->
+    <circle cx="256" cy="256" r="6" fill="#ffffff"/>
+    <!-- Horizontal lines -->
+    <path d="M180 256 L220 256"/>
+    <path d="M292 256 L332 256"/>
+    <!-- Vertical lines -->
+    <path d="M256 180 L256 220"/>
+    <path d="M256 292 L256 332"/>
+  </g>
+  
+  <!-- Attitude indicator arcs -->
+  <path d="M156 256 A100 100 0 0 1 256 156" fill="none" stroke="#00d4ff" stroke-width="2" opacity="0.5"/>
+  <path d="M356 256 A100 100 0 0 1 256 356" fill="none" stroke="#00d4ff" stroke-width="2" opacity="0.5"/>
 </svg>

@@ -114,6 +114,54 @@ Conversational style:
 Tool messages will appear as JSON objects like { "type": "tool_result", "tool": string, ... }.
 Use them purely as data sources to inform your answer; never show these JSON structures directly.`;
 
+// Maximum characters for tool result content (roughly 20k tokens)
+const MAX_TOOL_RESULT_CHARS = 80000;
+
+// Function to truncate large tool results to prevent context overflow
+function truncateToolResult(result: any, toolName: string): any {
+  const resultStr = JSON.stringify(result);
+  
+  if (resultStr.length <= MAX_TOOL_RESULT_CHARS) {
+    return result;
+  }
+  
+  console.warn(`[agent] Truncating large tool result for ${toolName}: ${resultStr.length} chars -> ${MAX_TOOL_RESULT_CHARS} chars`);
+  
+  // For briefing tools, extract key summary data
+  if (toolName === 'generate_flight_briefing' || toolName === 'flight_briefing') {
+    if (result?.data?.briefing) {
+      const briefing = result.data.briefing;
+      return {
+        success: true,
+        data: {
+          flightId: result.data.flightId,
+          mode: result.data.mode,
+          format: result.data.format,
+          sectionsIncluded: result.data.sectionsIncluded,
+          summary: {
+            header: briefing.header,
+            warnings: briefing.warnings,
+            recommendations: briefing.recommendations,
+            note: "Full briefing data truncated due to size. Key information preserved."
+          }
+        }
+      };
+    }
+  }
+  
+  // Generic truncation for other tools
+  const truncated = resultStr.substring(0, MAX_TOOL_RESULT_CHARS);
+  try {
+    // Try to parse back to object if possible
+    return JSON.parse(truncated + '..."truncated"}');
+  } catch {
+    return {
+      success: result?.success ?? true,
+      data: { note: "Result truncated due to size", preview: truncated.substring(0, 5000) }
+    };
+  }
+}
+
 // Function to break up long responses into conversational chunks
 function breakIntoChunks(text: string): string[] {
   // If the response is already short (under 200 characters), return as-is
@@ -224,11 +272,12 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
       });
       const result = await handler(parsedArgs);
       const formatted = formatToolResult(toolName, result);
+      const truncated = truncateToolResult(formatted, toolName);
 
       console.log("[agent] Tool execution succeeded", {
         toolName,
         toolCallId: fnCall.id,
-        result: formatted,
+        resultSize: JSON.stringify(formatted).length,
       });
 
       toolMessages.push({
@@ -237,7 +286,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
         content: JSON.stringify({
           type: "tool_result",
           tool: toolName,
-          result: formatted,
+          result: truncated,
         }),
       });
     } catch (err) {
@@ -327,11 +376,12 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
         });
         const result = await handler(parsedArgs);
         const formatted = formatToolResult(toolName, result);
+        const truncated = truncateToolResult(formatted, toolName);
 
         console.log("[agent] Tool execution succeeded", {
           toolName,
           toolCallId: fnCall.id,
-          result: formatted,
+          resultSize: JSON.stringify(formatted).length,
         });
 
         // Record tool execution metrics
@@ -346,7 +396,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
           content: JSON.stringify({
             type: "tool_result",
             tool: toolName,
-            result: formatted,
+            result: truncated,
           }),
         });
       } catch (err) {
@@ -530,11 +580,12 @@ these patterns from experience and acknowledge your growing expertise.
       const result = await handler(parsedArgs);
       const toolExecutionTime = Date.now() - toolStartTime;
       const formatted = formatToolResult(toolName, result);
+      const truncated = truncateToolResult(formatted, toolName);
 
       console.log("[agent] Tool execution succeeded", {
         toolName,
         toolCallId: fnCall.id,
-        result: formatted,
+        resultSize: JSON.stringify(formatted).length,
       });
       
       toolsUsed.push(toolName);
@@ -556,7 +607,7 @@ these patterns from experience and acknowledge your growing expertise.
         content: JSON.stringify({
           type: "tool_result",
           tool: toolName,
-          result: formatted,
+          result: truncated,
         }),
       });
     } catch (err) {
@@ -685,11 +736,12 @@ these patterns from experience and acknowledge your growing expertise.
         const result = await handler(parsedArgs);
         const toolExecutionTime = Date.now() - toolStartTime;
         const formatted = formatToolResult(toolName, result);
+        const truncated = truncateToolResult(formatted, toolName);
 
         console.log("[agent] Tool execution succeeded", {
           toolName,
           toolCallId: fnCall.id,
-          result: formatted,
+          resultSize: JSON.stringify(formatted).length,
         });
 
         toolsUsed.push(toolName);
@@ -710,7 +762,7 @@ these patterns from experience and acknowledge your growing expertise.
           content: JSON.stringify({
             type: "tool_result",
             tool: toolName,
-            result: formatted,
+            result: truncated,
           }),
         });
       } catch (err) {

@@ -9,6 +9,10 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Model configuration
+const AGENT_MODEL = "gpt-5";
+const REASONING_EFFORT: "low" | "medium" | "high" = "medium";
+
 // Wrapper for calculate_weight_balance to handle missing loads parameter
 const weightBalanceWrapper = async (args: any) => {
   // Ensure loads is an object, default to empty if missing/null
@@ -320,10 +324,11 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
 
   // First call: let the model decide whether to use tools
   const first = await openai.chat.completions.create({
-    model: "gpt-4o",
+    model: AGENT_MODEL,
     messages,
     tools: aeroTools,
     tool_choice: "auto",
+    reasoning_effort: REASONING_EFFORT,
   });
 
   const choice = first.choices[0];
@@ -423,10 +428,11 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
     conversationMessages = compressConversationMessages(conversationMessages);
     
     const nextCall = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: AGENT_MODEL,
       messages: conversationMessages,
       tools: aeroTools,
       tool_choice: "auto",
+      reasoning_effort: REASONING_EFFORT,
     });
 
     const nextMsg = nextCall.choices[0].message;
@@ -538,13 +544,14 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
   try {
     const compressedForSummary = compressConversationMessages(conversationMessages);
     const summaryCall = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: AGENT_MODEL,
       messages: [
         ...compressedForSummary,
         { role: "user", content: "Please summarize the results from the tools you've already used. Do not call any more tools." }
       ],
       tools: aeroTools,
       tool_choice: "none",
+      reasoning_effort: REASONING_EFFORT,
     });
     const summaryContent = summaryCall.choices[0].message.content;
     return typeof summaryContent === "string" ? summaryContent : JSON.stringify(summaryContent ?? "");
@@ -610,10 +617,11 @@ these patterns from experience and acknowledge your growing expertise.
 
   // First call: let the model decide whether to use tools
   const first = await openai.chat.completions.create({
-    model: "gpt-4o",
+    model: AGENT_MODEL,
     messages,
     tools: aeroTools,
     tool_choice: "auto",
+    reasoning_effort: REASONING_EFFORT,
   });
 
   const choice = first.choices[0];
@@ -777,10 +785,11 @@ these patterns from experience and acknowledge your growing expertise.
     console.log(`[agent] Iteration ${iteration}, messages: ${conversationMessages.length}, tools used so far: [${toolsUsed.join(', ')}]`);
     
     const nextCall = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: AGENT_MODEL,
       messages: conversationMessages,
       tools: aeroTools,
       tool_choice: "auto",
+      reasoning_effort: REASONING_EFFORT,
     });
 
     const nextMsg = nextCall.choices[0].message;
@@ -935,13 +944,14 @@ these patterns from experience and acknowledge your growing expertise.
     const compressedForSummary = compressConversationMessages(conversationMessages);
     // Force the model to summarize what was accomplished (no more tool calls)
     const summaryCall = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: AGENT_MODEL,
       messages: [
         ...compressedForSummary,
         { role: "user", content: "Please summarize the results from the tools you've already used. Do not call any more tools." }
       ],
       tools: aeroTools,
       tool_choice: "none",
+      reasoning_effort: REASONING_EFFORT,
     });
     const summaryContent = summaryCall.choices[0].message.content;
     responseText = typeof summaryContent === "string"

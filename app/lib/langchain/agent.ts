@@ -315,7 +315,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
 
   // Continue calling the model until no more tool calls (multi-step task support)
   let conversationMessages = [...messages, msg, ...toolMessages];
-  let maxIterations = 5; // Prevent infinite loops
+  let maxIterations = 10; // Prevent infinite loops
   let iteration = 0;
   
   while (iteration < maxIterations) {
@@ -432,9 +432,24 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
     conversationMessages = [...conversationMessages, nextMsg, ...nextToolMessages];
   }
   
-  // If we hit max iterations, return what we have
-  console.warn("[agent] Hit max iterations for multi-step task");
-  return "I've completed the available steps, but the task may require additional actions.";
+  // If we hit max iterations, force a final summary
+  console.warn("[agent] Hit max iterations for multi-step task, forcing summary");
+  try {
+    const summaryCall = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        ...conversationMessages,
+        { role: "user", content: "Please summarize the results from the tools you've already used. Do not call any more tools." }
+      ],
+      tools: aeroTools,
+      tool_choice: "none",
+    });
+    const summaryContent = summaryCall.choices[0].message.content;
+    return typeof summaryContent === "string" ? summaryContent : JSON.stringify(summaryContent ?? "");
+  } catch (summaryErr) {
+    console.error("[agent] Summary call failed:", summaryErr);
+    return "I've completed the available steps, but the task may require additional actions.";
+  }
 }
 
 // New function for streaming conversational responses with memory integration
@@ -649,7 +664,7 @@ these patterns from experience and acknowledge your growing expertise.
 
   // Continue calling the model until no more tool calls (multi-step task support)
   let conversationMessages = [...messages, msg, ...toolMessages];
-  let maxIterations = 5;
+  let maxIterations = 10;
   let iteration = 0;
   
   while (iteration < maxIterations) {
@@ -804,14 +819,32 @@ these patterns from experience and acknowledge your growing expertise.
     conversationMessages = [...conversationMessages, nextMsg, ...nextToolMessages];
   }
   
-  // If we hit max iterations
-  console.warn("[agent] Hit max iterations for multi-step task");
-  const responseText = "I've completed the available steps, but the task may require additional actions.";
+  // If we hit max iterations, force a final summary instead of returning generic message
+  console.warn("[agent] Hit max iterations for multi-step task, forcing summary");
+  
+  let responseText: string;
+  try {
+    // Force the model to summarize what was accomplished (no more tool calls)
+    const summaryCall = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        ...conversationMessages,
+        { role: "user", content: "Please summarize the results from the tools you've already used. Do not call any more tools." }
+      ],
+      tools: aeroTools,
+      tool_choice: "none",
+    });
+    const summaryContent = summaryCall.choices[0].message.content;
+    responseText = typeof summaryContent === "string"
+      ? summaryContent
+      : JSON.stringify(summaryContent ?? "");
+  } catch (summaryErr) {
+    console.error("[agent] Summary call failed:", summaryErr);
+    responseText = "I've completed the available steps, but the task may require additional actions.";
+  }
 
-  // Break up long responses into conversational chunks
   const chunks = breakIntoChunks(responseText);
   
-  // Log interaction (async, don't block response)
   const responseTime = Date.now() - startTime;
   logInteraction({
     sessionId,
@@ -831,6 +864,7 @@ these patterns from experience and acknowledge your growing expertise.
     chunks, 
     hasMore: chunks.length > 1,
     toolsUsed,
+    toolResults,
     appliedStrategies: strategyIds
   };
 }

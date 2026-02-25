@@ -15,7 +15,7 @@ const openai = getOpenAIClient();
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { query, resetContext, streaming = true, fileUpload } = body;
+    const { query, resetContext, streaming = true, fileUpload, history: clientHistory } = body;
     
     const cookies = request.cookies;
     let sessionId = cookies.get('session_id')?.value;
@@ -128,12 +128,19 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Add the user's message to the in-memory conversation
-    addMessage(sessionId, 'user', query);
-    const history = getAllMessages(sessionId);
-
-    // Map our stored messages into OpenAI chat message format
-    const openAiHistory = history.map(m => ({ role: m.role, content: m.content }));
+    // Use client-provided history if available (reliable), fall back to in-memory store
+    let openAiHistory: any[];
+    if (clientHistory && Array.isArray(clientHistory) && clientHistory.length > 0) {
+      // Client sends full conversation history - use it directly
+      openAiHistory = clientHistory;
+      console.log(`[API] Using client-provided history: ${clientHistory.length} messages`);
+    } else {
+      // Fallback to in-memory store (may be empty on serverless cold start)
+      addMessage(sessionId, 'user', query);
+      const history = getAllMessages(sessionId);
+      openAiHistory = history.map(m => ({ role: m.role, content: m.content }));
+      console.log(`[API] Using in-memory history: ${openAiHistory.length} messages`);
+    }
 
     // Use streaming function for more natural responses
     let toolResults: any[] = [];
@@ -142,7 +149,6 @@ export async function POST(request: NextRequest) {
       chunks = streamingResponse.chunks;
       hasMore = streamingResponse.hasMore;
       toolResults = streamingResponse.toolResults || [];
-      responseContent = chunks[0] || ''; // First chunk for immediate response
       
       // Remove spaces from all https URLs in markdown links
       chunks = chunks.map(chunk => {
@@ -151,7 +157,7 @@ export async function POST(request: NextRequest) {
           return `[${text}](${cleanUrl})`;
         });
       });
-      responseContent = chunks[0] || '';
+      responseContent = chunks.join('\n\n'); // Store full response, not just first chunk
     } else {
       // Fallback to original function
       responseContent = await handleAviationQuery(openAiHistory as any);
@@ -162,7 +168,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Store the first chunk (or full response) back into conversation history
+    // Also update in-memory store as backup
     addMessage(sessionId, 'assistant', responseContent);
     
     const response = NextResponse.json({ 

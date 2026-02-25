@@ -75,6 +75,8 @@ FORMAT:
 
 CRITICAL: Any request with "in X minutes/hours" or "send X in Y time" MUST use schedule_task!
 
+IMPORTANT: On startup, always run the "now" tool to get the current local date and time. This ensures you have accurate temporal context for all operations.
+
 Use these tools whenever the user asks about something that benefits from
 live or structured aviation data (weather, NOTAMs, airport details, etc.).
 

@@ -390,6 +390,16 @@ export default function Home() {
     };
   }, []);
 
+  // Build conversation history for API calls (last 20 messages to stay within token limits)
+  const buildHistory = (currentMessages: Message[], extraUserMessage?: string) => {
+    const recent = currentMessages.slice(-20);
+    const history = recent.map(m => ({ role: m.role, content: m.content }));
+    if (extraUserMessage) {
+      history.push({ role: "user" as const, content: extraUserMessage });
+    }
+    return history;
+  };
+
   // Add a message to the conversation
   const addMessage = (role: "user" | "assistant", content: string, tools?: string[], toolResults?: any[]) => {
     const newMessage: Message = {
@@ -430,7 +440,8 @@ export default function Home() {
         reader.readAsDataURL(file);
       });
       
-      // Add user message about the upload
+      // Build history BEFORE adding user message to state (setState is async)
+      const uploadHistory = buildHistory(messages, `📎 Uploading: ${file.name}`);
       addMessage("user", `📎 Uploading: ${file.name}`);
       
       // Send to API with upload request
@@ -441,6 +452,7 @@ export default function Home() {
         },
         body: JSON.stringify({
           query: `Upload this file: ${file.name}`,
+          history: uploadHistory,
           streaming: true,
           fileUpload: {
             base64Content: base64,
@@ -492,6 +504,8 @@ export default function Home() {
     // Initialize audio on first interaction (iOS requirement)
     initializeAudio();
 
+    // Build history BEFORE adding user message to state (setState is async)
+    const history = buildHistory(messages, query);
     addMessage("user", query);
     setIsSendingText(true);
     setIsThinking(true);
@@ -506,6 +520,7 @@ export default function Home() {
         },
         body: JSON.stringify({ 
           query,
+          history,
           streaming: true 
         }),
         credentials: 'include',
@@ -609,6 +624,8 @@ export default function Home() {
         if (finalTranscript) {
           const cleanTranscript = finalTranscript.trim();
           console.log("🎤 Final transcript:", cleanTranscript);
+          // Build history BEFORE adding user message to state (setState is async)
+          const voiceHistory = buildHistory(messages, cleanTranscript);
           addMessage("user", cleanTranscript);
           setCurrentTranscript("");
           setIsThinking(true);
@@ -622,6 +639,7 @@ export default function Home() {
             },
             body: JSON.stringify({
               query: cleanTranscript,
+              history: voiceHistory,
               streaming: true,
             }),
             credentials: 'include'

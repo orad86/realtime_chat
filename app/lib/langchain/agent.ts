@@ -9,10 +9,20 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Override handlers to use web-accessible create_document
+// Wrapper for calculate_weight_balance to handle missing loads parameter
+const weightBalanceWrapper = async (args: any) => {
+  // Ensure loads is an object, default to empty if missing/null
+  if (!args.loads || typeof args.loads !== 'object') {
+    args.loads = {};
+  }
+  return handlers.calculate_weight_balance(args);
+};
+
+// Override handlers to use web-accessible create_document and fix weight balance
 const overriddenHandlers = {
   ...handlers,
-  create_document: createDocumentWrapper.execute
+  create_document: createDocumentWrapper.execute,
+  calculate_weight_balance: weightBalanceWrapper
 };
 
 const SYSTEM_PROMPT = `You are an AI aviation assistant with a long-term memory system.

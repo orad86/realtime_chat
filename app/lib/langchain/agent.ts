@@ -18,11 +18,13 @@ const weightBalanceWrapper = async (args: any) => {
   return handlers.calculate_weight_balance(args);
 };
 
-// Override handlers to use web-accessible create_document and fix weight balance
+// Override handlers to use web-accessible create_document and fix tool name mismatches
 const overriddenHandlers = {
   ...handlers,
   create_document: createDocumentWrapper.execute,
-  calculate_weight_balance: weightBalanceWrapper
+  calculate_weight_balance: weightBalanceWrapper,
+  // Tool definition uses generate_flight_briefing but handler is flight_briefing
+  generate_flight_briefing: handlers.flight_briefing
 };
 
 const SYSTEM_PROMPT = `You are an AI aviation assistant with a long-term memory system.

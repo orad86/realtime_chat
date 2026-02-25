@@ -48,3 +48,4 @@ next-env.d.ts
 .netlify
 .env*.local
 .env.vercel
+package-lock.json

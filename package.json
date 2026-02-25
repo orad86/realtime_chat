@@ -13,7 +13,7 @@
     "@aws-sdk/client-dynamodb": "^3.992.0",
     "@aws-sdk/lib-dynamodb": "^3.992.0",
     "@langchain/openai": "^1.2.1",
-    "@orad86/ai-aero-tools": "file:./vendor/orad86-ai-aero-tools-0.9.9.tgz",
+    "@orad86/ai-aero-tools": "^0.9.9",
     "@tailwindcss/postcss": "^4.2.1",
     "@types/uuid": "^10.0.0",
     "form-data": "^4.0.5",

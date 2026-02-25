@@ -75,6 +75,24 @@ export async function GET() {
     
     for (const interaction of interactions) {
       try {
+        // Truncate tool results to fit within context limits
+        const MAX_TOOL_RESULTS_CHARS = 50000;
+        let toolResultsStr = JSON.stringify(interaction.toolResults);
+        if (toolResultsStr.length > MAX_TOOL_RESULTS_CHARS) {
+          // Keep only tool name, success status, and a short preview per tool
+          const condensed = (interaction.toolResults || []).map((tr: any) => ({
+            toolName: tr.toolName,
+            success: tr.success,
+            executionTime: tr.executionTime,
+            preview: JSON.stringify(tr.result || tr.error || '').substring(0, 500)
+          }));
+          toolResultsStr = JSON.stringify(condensed);
+          console.log(`[Learning] Truncated tool results from ${JSON.stringify(interaction.toolResults).length} to ${toolResultsStr.length} chars`);
+        }
+        
+        // Also truncate agent response if very long
+        const agentResponse = (interaction.agentResponse || '').substring(0, 10000);
+        
         // Analyze interaction with GPT
         const analysis = await openai.chat.completions.create({
           model: "gpt-4o",
@@ -83,9 +101,9 @@ export async function GET() {
             content: `${ANALYSIS_PROMPT}
 
 USER QUERY: ${interaction.userMessage}
-AGENT RESPONSE: ${interaction.agentResponse}
+AGENT RESPONSE: ${agentResponse}
 TOOLS USED: ${interaction.toolsUsed.join(", ")}
-TOOL RESULTS: ${JSON.stringify(interaction.toolResults)}
+TOOL RESULTS: ${toolResultsStr}
 `
           }],
           response_format: { type: "json_object" },

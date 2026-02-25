@@ -98,11 +98,21 @@ CRITICAL - create_document RESPONSES:
   Format for emails: "Download the PDF: [URL]" or as a markdown link.
   Copy the EXACT URL from the tool result without spaces or truncation.
 
-CRITICAL - Multi-step tasks:
-- If a request requires multiple tools (e.g., "get NOTAMs and create PDF"), execute ALL tools in the SAME response
+CRITICAL - Multi-step tasks and tool chaining:
+- If a request requires multiple tools, execute ALL tools before responding to the user
 - NEVER say "I will do X" without actually doing it immediately
-- Complete the entire workflow before responding to the user
-- Example: For "get NOTAMs and create PDF", use get_notams THEN create_document in one response
+- Complete the entire workflow before responding
+- BATCH parallel calls: If you need data from multiple airports (weather, NOTAMs, info), call them ALL in the same turn
+- CHAIN data between tools: Use results from earlier tools as inputs for later tools
+  Example workflow for "flight from LLHA to LLER with briefing PDF":
+  1. Call now + analyze_route + get_airport_info(LLHA) + get_airport_info(LLER) simultaneously
+  2. Call get_aviation_weather(LLHA) + get_aviation_weather(LLER) + get_notams(LLHA) + get_notams(LLER) simultaneously
+  3. Call calculate_weight_balance with the aircraft and load data
+  4. Call generate_flight_briefing using data gathered from all previous steps
+  5. Call create_document to generate the PDF from the briefing
+- When calling a tool that needs data from a previous tool, extract and pass the specific values
+- Do NOT repeat tool calls - use the results you already have
+- When generating a briefing or document, incorporate ALL data gathered from previous tool calls
 
 Conversational style:
 - Respond like a human would - in natural, shorter messages
@@ -116,10 +126,12 @@ Conversational style:
 Tool messages will appear as JSON objects like { "type": "tool_result", "tool": string, ... }.
 Use them purely as data sources to inform your answer; never show these JSON structures directly.`;
 
-// Maximum characters for tool result content (roughly 20k tokens)
-const MAX_TOOL_RESULT_CHARS = 80000;
+// Per-tool result limit (~7.5K tokens) - lower to allow many tools in one workflow
+const MAX_TOOL_RESULT_CHARS = 30000;
+// Total context budget for all tool messages combined (~50K tokens)
+const MAX_TOTAL_CONTEXT_CHARS = 200000;
 
-// Function to truncate large tool results to prevent context overflow
+// Function to truncate a single tool result to prevent it being too large
 function truncateToolResult(result: any, toolName: string): any {
   const resultStr = JSON.stringify(result);
   
@@ -151,10 +163,30 @@ function truncateToolResult(result: any, toolName: string): any {
     }
   }
   
+  // For weather tools, keep essential fields
+  if (toolName === 'get_aviation_weather' || toolName === 'get_weather') {
+    if (result?.data) {
+      const d = result.data;
+      return {
+        success: true,
+        data: {
+          station: d.station || d.icao,
+          metar: d.metar || d.rawMetar,
+          taf: d.taf || d.rawTaf,
+          conditions: d.conditions || d.flightCategory,
+          wind: d.wind,
+          visibility: d.visibility,
+          ceiling: d.ceiling,
+          temperature: d.temperature,
+          note: "Weather data condensed. Key fields preserved."
+        }
+      };
+    }
+  }
+  
   // Generic truncation for other tools
   const truncated = resultStr.substring(0, MAX_TOOL_RESULT_CHARS);
   try {
-    // Try to parse back to object if possible
     return JSON.parse(truncated + '..."truncated"}');
   } catch {
     return {
@@ -162,6 +194,72 @@ function truncateToolResult(result: any, toolName: string): any {
       data: { note: "Result truncated due to size", preview: truncated.substring(0, 5000) }
     };
   }
+}
+
+// Compress conversation messages to stay within context budget.
+// Older tool results are compressed to summaries while preserving recent ones.
+function compressConversationMessages(
+  msgs: OpenAI.Chat.ChatCompletionMessageParam[]
+): OpenAI.Chat.ChatCompletionMessageParam[] {
+  const totalChars = msgs.reduce((sum, m) => {
+    const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+    return sum + content.length;
+  }, 0);
+  
+  if (totalChars <= MAX_TOTAL_CONTEXT_CHARS) {
+    return msgs;
+  }
+  
+  console.warn(`[agent] Context too large (${totalChars} chars), compressing older tool results`);
+  
+  // Find all tool message indices (oldest first)
+  const toolIndices: number[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    if (msgs[i].role === 'tool') {
+      toolIndices.push(i);
+    }
+  }
+  
+  // Keep the most recent 4 tool results intact, compress older ones
+  const recentToolCount = 4;
+  const indicesToCompress = toolIndices.slice(0, Math.max(0, toolIndices.length - recentToolCount));
+  
+  const compressed = [...msgs];
+  for (const idx of indicesToCompress) {
+    const content = compressed[idx].content as string;
+    if (content && content.length > 500) {
+      try {
+        const parsed = JSON.parse(content);
+        const toolName = parsed.tool || 'unknown';
+        const success = parsed.result?.success ?? parsed.success ?? true;
+        compressed[idx] = {
+          ...compressed[idx],
+          content: JSON.stringify({
+            type: "tool_result",
+            tool: toolName,
+            result: {
+              success,
+              note: `Earlier ${toolName} result compressed. Key data was used in subsequent tool calls.`
+            }
+          })
+        };
+      } catch {
+        // If we can't parse, just truncate hard
+        compressed[idx] = {
+          ...compressed[idx],
+          content: (content as string).substring(0, 500) + '...(compressed)'
+        };
+      }
+    }
+  }
+  
+  const newTotal = compressed.reduce((sum, m) => {
+    const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+    return sum + c.length;
+  }, 0);
+  console.log(`[agent] Compressed context: ${totalChars} -> ${newTotal} chars`);
+  
+  return compressed;
 }
 
 // Function to break up long responses into conversational chunks
@@ -321,6 +419,9 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
   while (iteration < maxIterations) {
     iteration++;
     
+    // Compress older tool results if context is getting too large
+    conversationMessages = compressConversationMessages(conversationMessages);
+    
     const nextCall = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: conversationMessages,
@@ -435,10 +536,11 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
   // If we hit max iterations, force a final summary
   console.warn("[agent] Hit max iterations for multi-step task, forcing summary");
   try {
+    const compressedForSummary = compressConversationMessages(conversationMessages);
     const summaryCall = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
-        ...conversationMessages,
+        ...compressedForSummary,
         { role: "user", content: "Please summarize the results from the tools you've already used. Do not call any more tools." }
       ],
       tools: aeroTools,
@@ -670,6 +772,10 @@ these patterns from experience and acknowledge your growing expertise.
   while (iteration < maxIterations) {
     iteration++;
     
+    // Compress older tool results if context is getting too large
+    conversationMessages = compressConversationMessages(conversationMessages);
+    console.log(`[agent] Iteration ${iteration}, messages: ${conversationMessages.length}, tools used so far: [${toolsUsed.join(', ')}]`);
+    
     const nextCall = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: conversationMessages,
@@ -759,6 +865,7 @@ these patterns from experience and acknowledge your growing expertise.
           toolName,
           toolCallId: fnCall.id,
           resultSize: JSON.stringify(formatted).length,
+          truncatedSize: JSON.stringify(truncated).length,
         });
 
         toolsUsed.push(toolName);
@@ -824,11 +931,13 @@ these patterns from experience and acknowledge your growing expertise.
   
   let responseText: string;
   try {
+    // Compress before summary call to avoid context overflow
+    const compressedForSummary = compressConversationMessages(conversationMessages);
     // Force the model to summarize what was accomplished (no more tool calls)
     const summaryCall = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
-        ...conversationMessages,
+        ...compressedForSummary,
         { role: "user", content: "Please summarize the results from the tools you've already used. Do not call any more tools." }
       ],
       tools: aeroTools,

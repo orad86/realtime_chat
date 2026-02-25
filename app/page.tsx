@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
 import PWAInstallPrompt from "./components/PWAInstallPrompt";
 import ServiceWorkerRegistration from "./components/ServiceWorkerRegistration";
 
@@ -913,6 +914,7 @@ export default function Home() {
                       <div className="flex-1">
                         <div className="text-sm text-white break-words">
                           <ReactMarkdown
+                            rehypePlugins={[rehypeRaw]}
                             components={{
                               // Style links to be clickable and visible
                               a: ({href, children}) => (

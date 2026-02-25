@@ -11,7 +11,9 @@ const openai = new OpenAI({
 
 // Model configuration
 const AGENT_MODEL = "gpt-5";
-const REASONING_EFFORT: "low" | "medium" | "high" = "medium";
+// Low reasoning for tool dispatch (fast), medium for final user-facing synthesis
+const TOOL_REASONING: "low" | "medium" | "high" = "low";
+const FINAL_REASONING: "low" | "medium" | "high" = "medium";
 
 // Wrapper for calculate_weight_balance to handle missing loads parameter
 const weightBalanceWrapper = async (args: any) => {
@@ -126,6 +128,15 @@ Conversational style:
 - Think like you're speaking to someone in person - pause between thoughts
 - Use natural transitions like "Also," "Additionally," "Another point is," etc.
 - Avoid long paragraphs - prefer shorter, focused responses
+
+FORMATTING RULES (STRICT - your output is rendered with ReactMarkdown):
+- Use standard markdown: **bold**, *italic*, # headings, - bullet lists, 1. numbered lists
+- Use markdown links: [text](url)
+- For data tables use markdown tables with | pipes
+- Do NOT use HTML tags like <b>, <i>, <br>, <ul>, <li>, <table>, etc.
+- Do NOT use custom formatting, LaTeX, or non-standard markdown extensions
+- Keep paragraphs short with blank lines between them
+- Use code blocks with backticks only for actual code or ICAO identifiers
 
 Tool messages will appear as JSON objects like { "type": "tool_result", "tool": string, ... }.
 Use them purely as data sources to inform your answer; never show these JSON structures directly.`;
@@ -328,7 +339,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
     messages,
     tools: aeroTools,
     tool_choice: "auto",
-    reasoning_effort: REASONING_EFFORT,
+    reasoning_effort: TOOL_REASONING,
   });
 
   const choice = first.choices[0];
@@ -432,7 +443,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
       messages: conversationMessages,
       tools: aeroTools,
       tool_choice: "auto",
-      reasoning_effort: REASONING_EFFORT,
+      reasoning_effort: TOOL_REASONING,
     });
 
     const nextMsg = nextCall.choices[0].message;
@@ -551,7 +562,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
       ],
       tools: aeroTools,
       tool_choice: "none",
-      reasoning_effort: REASONING_EFFORT,
+      reasoning_effort: FINAL_REASONING,
     });
     const summaryContent = summaryCall.choices[0].message.content;
     return typeof summaryContent === "string" ? summaryContent : JSON.stringify(summaryContent ?? "");
@@ -621,7 +632,7 @@ these patterns from experience and acknowledge your growing expertise.
     messages,
     tools: aeroTools,
     tool_choice: "auto",
-    reasoning_effort: REASONING_EFFORT,
+    reasoning_effort: TOOL_REASONING,
   });
 
   const choice = first.choices[0];
@@ -789,7 +800,7 @@ these patterns from experience and acknowledge your growing expertise.
       messages: conversationMessages,
       tools: aeroTools,
       tool_choice: "auto",
-      reasoning_effort: REASONING_EFFORT,
+      reasoning_effort: TOOL_REASONING,
     });
 
     const nextMsg = nextCall.choices[0].message;
@@ -951,7 +962,7 @@ these patterns from experience and acknowledge your growing expertise.
       ],
       tools: aeroTools,
       tool_choice: "none",
-      reasoning_effort: REASONING_EFFORT,
+      reasoning_effort: FINAL_REASONING,
     });
     const summaryContent = summaryCall.choices[0].message.content;
     responseText = typeof summaryContent === "string"

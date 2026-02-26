@@ -3,14 +3,20 @@ import { tools as aeroTools, handlers, formatToolResult } from "@orad86/ai-aero-
 import { createDocumentWrapper } from "../tools/create-document-wrapper";
 import { selectStrategiesWithDynamicBudget, formatStrategiesForPrompt, getStrategyIds } from "../memory/injection";
 import { logInteraction } from "../memory/log-interaction";
-import { recordToolExecution } from "../memory/tool-metrics";
+import { WorkingMemory } from "../memory/working-memory";
+import { executeWithProxy } from "../memory/tool-proxy";
+import { EpisodicMemory, ToolAction } from "../memory/episodic-memory";
+import { assembleContext } from "../memory/context-assembler";
+import { getUserPreferencesStore } from "../memory/user-preferences";
+import { WorkflowTemplateStore } from "../memory/workflow-templates";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 // Model configuration
-const AGENT_MODEL = "gpt-5";
+const TOOL_MODEL = "gpt-5-mini"; // Fast model for tool dispatch
+const FINAL_MODEL = "gpt-5"; // Full model for final user-facing synthesis
 // Low reasoning for tool dispatch (fast), medium for final user-facing synthesis
 const TOOL_REASONING: "low" | "medium" | "high" = "low";
 const FINAL_REASONING: "low" | "medium" | "high" = "medium";
@@ -113,6 +119,42 @@ CRITICAL - DOCUMENT TOOLS (generate_flight_briefing, generate_nav_log, calculate
 - In your chat response, give a SHORT summary (2-3 sentences) of the key findings
 - Example: "Your flight briefing is ready. Key highlights: winds 270/15, CAVOK at both airports, no significant NOTAMs. Creating the PDF now..."
 
+CRITICAL - STANDALONE TOOL ARCHITECTURE (v1.0.0):
+Tools do NOT call each other internally. YOU are the sole orchestrator. Each tool is a pure function that requires all its data as parameters. You must:
+1. Call prerequisite tools first to gather data
+2. Extract the needed values from their results
+3. Pass those values as parameters to dependent tools
+
+KEY DATA DEPENDENCIES — follow these patterns:
+
+generate_nav_log REQUIRES:
+- waypoints: array of {identifier, latitude, longitude, type} — call get_airport_info for airports and get_waypoint_data for waypoints first
+- tasKnots: from get_aircraft_performance → cruise_speed_knots
+- fuelFlowPph: from get_aircraft_performance → fuel_flow.cruise_pph
+- winds: from get_winds_aloft → array of {direction, speed}
+- departureElevationFt/destinationElevationFt: from get_airport_info → elevation
+
+generate_flight_briefing REQUIRES:
+- flightId: from create_flight result — you MUST call create_flight BEFORE generate_flight_briefing
+- prefetchedData with:
+  - departure/destination/alternate: {airportInfo, weather, notams, runwayInUse} — from get_airport_info, get_aviation_weather_data, get_notams, get_runway_in_use
+  - navLog: from generate_nav_log result
+  - weightBalance: from calculate_weight_balance result (pass the FULL result object, not just {_hasFormattedDocument: true})
+
+get_runway_in_use REQUIRES: airportLat, airportLon, runways (from get_airport_info), metar (from get_aviation_weather_data)
+find_alternate_airports REQUIRES: airportLat, airportLon (from get_airport_info)
+get_traffic_flow / get_runway_queue REQUIRES: airportLat, airportLon (from get_airport_info)
+get_procedure_in_use REQUIRES: airportLat, airportLon (from get_airport_info), landingRunways/takeoffRunways (from get_runway_in_use)
+detect_weather_anomalies REQUIRES: metar, taf (from get_aviation_weather_data)
+get_cloud_base_forecast REQUIRES: cloudLayers (from get_general_weather_forecast)
+
+EXAMPLE WORKFLOW — Flight Briefing:
+Turn 1: Batch call get_airport_info (dep + dest), get_aviation_weather_data (dep + dest), get_aircraft_performance
+Turn 2: Call get_notams (dep + dest), get_runway_in_use (pass airport coords + runways + metar), get_winds_aloft (pass route coords)
+Turn 3: Call generate_nav_log (pass waypoints, TAS, fuel flow, winds, elevations)
+Turn 4: Call calculate_weight_balance, then create_flight (to get a valid flightId)
+Turn 5: Call generate_flight_briefing (pass flightId from create_flight + ALL collected data as prefetchedData)
+
 CRITICAL - Multi-step tasks and tool chaining:
 - If a request requires multiple tools, execute ALL tools before responding to the user
 - NEVER say "I will do X" without actually doing it immediately — do it now
@@ -145,19 +187,153 @@ FORMATTING RULES (STRICT - your output is rendered with ReactMarkdown):
 Tool messages will appear as JSON objects like { "type": "tool_result", "tool": string, ... }.
 Use them purely as data sources to inform your answer; never show these JSON structures directly.`;
 
-// Cache for formattedHtml from document tools so create_document can auto-inject it
-let lastFormattedHtml: string | null = null;
+// ─── Session-scoped Working Memory ───────────────────────────
+// Replaces the old briefingDataCache with a generic, tool-agnostic cache
+// that supports TTL, data lineage, and dependency-based invalidation.
+const sessionWorkingMemory = new Map<string, WorkingMemory>();
+const sessionEpisodicMemory = new Map<string, EpisodicMemory>();
+const sessionWorkflowTemplates = new Map<string, WorkflowTemplateStore>();
 
-// Strip formattedHtml from tool results before sending to GPT-5.
-// Stores it in cache so create_document can use it automatically.
+function getWorkingMemory(sessionId: string): WorkingMemory {
+  let wm = sessionWorkingMemory.get(sessionId);
+  if (!wm) {
+    wm = new WorkingMemory();
+    sessionWorkingMemory.set(sessionId, wm);
+    console.log(`[agent] Created new WorkingMemory for session ${sessionId}`);
+  }
+  return wm;
+}
+
+function getEpisodicMemory(sessionId: string): EpisodicMemory {
+  let em = sessionEpisodicMemory.get(sessionId);
+  if (!em) {
+    em = new EpisodicMemory();
+    sessionEpisodicMemory.set(sessionId, em);
+    console.log(`[agent] Created new EpisodicMemory for session ${sessionId}`);
+  }
+  return em;
+}
+
+function getWorkflowTemplates(sessionId: string): WorkflowTemplateStore {
+  let wt = sessionWorkflowTemplates.get(sessionId);
+  if (!wt) {
+    wt = new WorkflowTemplateStore();
+    sessionWorkflowTemplates.set(sessionId, wt);
+  }
+  return wt;
+}
+
+// Auto-inject data from Working Memory into generate_flight_briefing's prefetchedData.
+// The briefing tool is a formatter — WM has the full raw results, so always use those.
+function autoInjectFromWorkingMemory(parsedArgs: any, wm: WorkingMemory): void {
+  if (!parsedArgs.prefetchedData) parsedArgs.prefetchedData = {};
+  const pre = parsedArgs.prefetchedData;
+  const getData = (entry: any) => entry.result?.data || entry.result;
+  const injected: string[] = [];
+
+  // flightId — use create_flight result if available
+  const flights = wm.getByTool("create_flight");
+  if (flights.length > 0) {
+    const id = getData(flights[flights.length - 1])?.id;
+    if (id && parsedArgs.flightId !== id) {
+      parsedArgs.flightId = id;
+      injected.push(`flightId=${id}`);
+    }
+  }
+
+  // navLog — always use full WM data
+  const navLogs = wm.getByTool("generate_nav_log");
+  if (navLogs.length > 0) {
+    const d = getData(navLogs[navLogs.length - 1]);
+    if (d?.legs?.length > 0) { pre.navLog = d; injected.push(`navLog(${d.legs.length} legs)`); }
+  }
+
+  // weightBalance — always use full WM data (model often passes partial summary)
+  const wbs = wm.getByTool("calculate_weight_balance");
+  if (wbs.length > 0) {
+    const d = getData(wbs[wbs.length - 1]);
+    if (d?.loadBreakdown) { pre.weightBalance = d; injected.push(`weightBalance(${Object.keys(d).length} keys)`); }
+  }
+
+  // chartsHtml — always use WM (model can't pass the full embedded HTML)
+  const charts = wm.getByTool("format_weather_charts");
+  if (charts.length > 0) {
+    const html = charts[0].formattedHtml || getData(charts[0])?.formattedHtml;
+    if (html && html.length > 1000) { parsedArgs.chartsHtml = html; injected.push(`chartsHtml(${html.length})`); }
+  }
+
+  // Airport data — get dep/dest ICAOs from the flight or navLog, then fill from WM
+  const depIcao = pre.navLog?.flight?.departure?.toUpperCase()
+    || (pre.navLog?.legs?.[0]?.from || '').toUpperCase();
+  const destIcao = pre.navLog?.flight?.destination?.toUpperCase()
+    || (pre.navLog?.legs?.[pre.navLog?.legs?.length - 1]?.to || '').toUpperCase();
+
+  const airportEntries = wm.getByTool("get_airport_info");
+  for (const entry of airportEntries) {
+    const icao = (entry.inputArgs?.icao || '').toUpperCase();
+    if (!icao) continue;
+    const target = icao === depIcao ? 'departure' : icao === destIcao ? 'destination'
+      : (!pre.alternate1 ? 'alternate1' : (!pre.alternate2 ? 'alternate2' : null));
+    if (!target) continue;
+    if (!pre[target]) pre[target] = {};
+    const d = getData(entry);
+    if (d) pre[target].airportInfo = { icao, name: d.name, elevation: d.elevation || d.elev, runways: d.runways };
+
+    // Weather, NOTAMs, runway-in-use for this airport
+    const byIcao = wm.getByIcao(icao);
+    const wx = byIcao.find(e => e.toolName === 'get_aviation_weather_data');
+    if (wx) { const wd = getData(wx); pre[target].weather = { metar: wd?.metar, taf: wd?.taf }; }
+    const notam = byIcao.find(e => e.toolName === 'get_notams');
+    if (notam) pre[target].notams = getData(notam);
+    const rwy = byIcao.find(e => e.toolName === 'get_runway_in_use');
+    if (rwy) { const rd = getData(rwy); pre[target].runwayInUse = typeof rd === 'string' ? rd : rd?.recommended || rd?.runway; }
+    injected.push(`${target}(${icao})`);
+  }
+
+  if (injected.length > 0) console.log(`[working-memory] Auto-injected: ${injected.join(', ')}`);
+}
+
+// Find the most recent formattedHtml from Working Memory.
+// Prefers generate_flight_briefing HTML over other tools (e.g. calculate_weight_balance)
+// to avoid creating a W&B PDF when a briefing PDF was intended.
+function findLatestFormattedHtml(wm: WorkingMemory): string | null {
+  const allEntries = wm.getAll();
+  let latest: { html: string; timestamp: number; toolName: string } | null = null;
+  let latestBriefing: { html: string; timestamp: number } | null = null;
+
+  for (const entry of allEntries) {
+    if (entry.formattedHtml) {
+      if (!latest || entry.timestamp > latest.timestamp) {
+        latest = { html: entry.formattedHtml, timestamp: entry.timestamp, toolName: entry.toolName };
+      }
+      if (entry.toolName === 'generate_flight_briefing') {
+        if (!latestBriefing || entry.timestamp > latestBriefing.timestamp) {
+          latestBriefing = { html: entry.formattedHtml, timestamp: entry.timestamp };
+        }
+      }
+    }
+  }
+
+  // Prefer briefing HTML when available (it's the "final" document that includes sub-documents)
+  if (latestBriefing) {
+    console.log(`[agent] Using formattedHtml from generate_flight_briefing (${latestBriefing.html.length} chars)`);
+    return latestBriefing.html;
+  }
+  if (latest) {
+    console.log(`[agent] Using formattedHtml from ${latest.toolName} (${latest.html.length} chars)`);
+  }
+  return latest?.html || null;
+}
+
+// Strip formattedHtml from tool results before sending to GPT.
+// The actual HTML is already cached in Working Memory via the tool-proxy.
 function stripHtmlFromToolResult(result: any): any {
   if (!result || typeof result !== 'object') return result;
   const cleaned = { ...result };
   if (cleaned.data && typeof cleaned.data === 'object') {
     const { formattedHtml, ...dataWithoutHtml } = cleaned.data;
     if (formattedHtml) {
-      lastFormattedHtml = formattedHtml;
-      console.log(`[agent] Cached formattedHtml (${formattedHtml.length} chars) for create_document auto-injection`);
+      console.log(`[agent] Stripped formattedHtml (${formattedHtml.length} chars) from tool result`);
       cleaned.data = {
         ...dataWithoutHtml,
         _hasFormattedDocument: true,
@@ -166,6 +342,121 @@ function stripHtmlFromToolResult(result: any): any {
     }
   }
   return cleaned;
+}
+
+// ─── Unified Tool Execution ──────────────────────────────────
+// Single function that replaces all 4 duplicated tool execution blocks.
+// Handles: cache check via proxy, auto-injection, formatting, metrics.
+async function executeTool(
+  toolName: string,
+  parsedArgs: Record<string, any>,
+  fnCallId: string,
+  wm: WorkingMemory,
+  fileUpload?: { base64Content: string; fileName: string; mimeType: string }
+): Promise<{
+  toolMessage: OpenAI.Chat.ChatCompletionToolMessageParam;
+  toolUsed: string;
+  toolResult: { toolName: string; inputArgs: Record<string, any>; success: boolean; result?: any; error?: string; executionTime: number; cached: boolean; decision: string };
+}> {
+  // 1. File upload injection
+  if (toolName === 'upload_document' && fileUpload) {
+    parsedArgs.base64Content = fileUpload.base64Content;
+    parsedArgs.fileName = fileUpload.fileName;
+    parsedArgs.mimeType = fileUpload.mimeType;
+    console.log("[agent] Injected fileUpload data into upload_document tool");
+  }
+
+  // 2. Auto-inject from Working Memory for create_document
+  if (toolName === 'create_document' && parsedArgs.content === 'USE_FORMATTED_HTML') {
+    const cachedHtml = findLatestFormattedHtml(wm);
+    if (cachedHtml) {
+      parsedArgs.content = cachedHtml;
+      console.log(`[agent] Auto-injected cached formattedHtml (${cachedHtml.length} chars) into create_document`);
+    }
+  }
+
+  // 3. Auto-inject from Working Memory for generate_flight_briefing
+  if (toolName === 'generate_flight_briefing') {
+    autoInjectFromWorkingMemory(parsedArgs, wm);
+  }
+
+  const handler = overriddenHandlers[toolName];
+  if (!handler) {
+    console.warn("[agent] No handler found for tool", { toolName, toolCallId: fnCallId });
+    return {
+      toolMessage: {
+        role: "tool" as const,
+        tool_call_id: fnCallId,
+        content: `Tool handler not implemented for ${toolName}.`,
+      },
+      toolUsed: toolName,
+      toolResult: { toolName, inputArgs: parsedArgs, success: false, error: `No handler for ${toolName}`, executionTime: 0, cached: false, decision: "No handler found" },
+    };
+  }
+
+  try {
+    // 4. Execute through Tool Proxy (handles cache check + execution + metrics)
+    const proxyResult = await executeWithProxy(toolName, parsedArgs, handler, wm);
+
+    // 5. Format for LLM context (strip HTML, truncate)
+    const formatted = formatToolResult(toolName, proxyResult.result);
+    const stripped = stripHtmlFromToolResult(formatted);
+    const truncated = truncateToolResult(stripped, toolName);
+
+    // 6. Annotate if cached so LLM knows
+    const resultPayload = proxyResult.cached
+      ? { ...truncated, _cached: true, _cacheAge: `${Math.round((Date.now() - proxyResult.entry.timestamp) / 60_000)}m` }
+      : truncated;
+
+    console.log("[agent] Tool execution succeeded", {
+      toolName,
+      toolCallId: fnCallId,
+      cached: proxyResult.cached,
+      executionTime: proxyResult.executionTime,
+      decision: proxyResult.decision,
+      resultSize: JSON.stringify(formatted).length,
+    });
+
+    return {
+      toolMessage: {
+        role: "tool" as const,
+        tool_call_id: fnCallId,
+        content: JSON.stringify({
+          type: "tool_result",
+          tool: toolName,
+          result: resultPayload,
+        }),
+      },
+      toolUsed: toolName,
+      toolResult: {
+        toolName,
+        inputArgs: parsedArgs,
+        success: true,
+        result: proxyResult.result,
+        executionTime: proxyResult.executionTime,
+        cached: proxyResult.cached,
+        decision: proxyResult.decision,
+      },
+    };
+  } catch (err) {
+    const errText = err instanceof Error ? err.message : String(err);
+    console.error("[agent] Tool execution failed", { toolName, toolCallId: fnCallId, error: errText });
+
+    return {
+      toolMessage: {
+        role: "tool" as const,
+        tool_call_id: fnCallId,
+        content: JSON.stringify({
+          type: "tool_result",
+          tool: toolName,
+          success: false,
+          error: errText,
+        }),
+      },
+      toolUsed: toolName,
+      toolResult: { toolName, inputArgs: parsedArgs, success: false, error: errText, executionTime: 0, cached: false, decision: `Failed: ${errText}` },
+    };
+  }
 }
 
 // Per-tool result limit (~7.5K tokens) - lower to allow many tools in one workflow
@@ -355,6 +646,10 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
     return "OpenAI API key is not configured on the server.";
   }
 
+  // Use a default WorkingMemory for the non-streaming path
+  const wm = getWorkingMemory("default");
+  wm.prune();
+
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: SYSTEM_PROMPT },
     ...history,
@@ -362,7 +657,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
 
   // First call: let the model decide whether to use tools
   const first = await openai.chat.completions.create({
-    model: AGENT_MODEL,
+    model: TOOL_MODEL,
     messages,
     tools: aeroTools,
     tool_choice: "auto",
@@ -377,13 +672,11 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
     return typeof content === "string" ? content : JSON.stringify(content ?? "");
   }
 
-  // Execute each requested tool call
+  // Execute each requested tool call via unified executeTool
   const toolMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
   for (const toolCall of msg.tool_calls) {
-    // Access as any so we can read `.function` without fighting SDK typings
     const fnCall = toolCall as any;
-
     const toolName = fnCall.function?.name as string;
     const rawArgs = fnCall.function?.arguments as string | undefined;
 
@@ -394,75 +687,14 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
       parsedArgs = {};
     }
 
-    const handler = overriddenHandlers[toolName];
-
-    if (!handler) {
-      console.warn("[agent] No handler found for tool", { toolName, toolCallId: fnCall.id });
-      toolMessages.push({
-        role: "tool",
-        tool_call_id: fnCall.id,
-        content: `Tool handler not implemented for ${toolName}.`,
-      });
-      continue;
-    }
-
-    try {
-      console.log("[agent] Executing tool", {
-        toolName,
-        toolCallId: fnCall.id,
-        rawArgs,
-        parsedArgs,
-      });
-      // Auto-inject cached formattedHtml for create_document
-      if (toolName === 'create_document' && lastFormattedHtml && parsedArgs.content === 'USE_FORMATTED_HTML') {
-        parsedArgs.content = lastFormattedHtml;
-        console.log(`[agent] Auto-injected cached formattedHtml (${lastFormattedHtml.length} chars) into create_document`);
-      }
-      const result = await handler(parsedArgs);
-      const formatted = formatToolResult(toolName, result);
-      const stripped = stripHtmlFromToolResult(formatted);
-      const truncated = truncateToolResult(stripped, toolName);
-
-      console.log("[agent] Tool execution succeeded", {
-        toolName,
-        toolCallId: fnCall.id,
-        resultSize: JSON.stringify(formatted).length,
-      });
-
-      toolMessages.push({
-        role: "tool",
-        tool_call_id: fnCall.id,
-        content: JSON.stringify({
-          type: "tool_result",
-          tool: toolName,
-          result: truncated,
-        }),
-      });
-    } catch (err) {
-      const errText = err instanceof Error ? err.message : String(err);
-
-      console.error("[agent] Tool execution failed", {
-        toolName,
-        toolCallId: fnCall.id,
-        error: errText,
-      });
-
-      toolMessages.push({
-        role: "tool",
-        tool_call_id: fnCall.id,
-        content: JSON.stringify({
-          type: "tool_result",
-          tool: toolName,
-          success: false,
-          error: errText,
-        }),
-      });
-    }
+    console.log("[agent] Executing tool", { toolName, toolCallId: fnCall.id, parsedArgs });
+    const { toolMessage } = await executeTool(toolName, parsedArgs, fnCall.id, wm);
+    toolMessages.push(toolMessage);
   }
 
   // Continue calling the model until no more tool calls (multi-step task support)
   let conversationMessages = [...messages, msg, ...toolMessages];
-  let maxIterations = 15; // Allow enough room for complex multi-tool workflows
+  let maxIterations = 20;
   let iteration = 0;
   
   while (iteration < maxIterations) {
@@ -472,7 +704,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
     conversationMessages = compressConversationMessages(conversationMessages);
     
     const nextCall = await openai.chat.completions.create({
-      model: AGENT_MODEL,
+      model: TOOL_MODEL,
       messages: conversationMessages,
       tools: aeroTools,
       tool_choice: "auto",
@@ -488,12 +720,11 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
         ? finalContent
         : JSON.stringify(finalContent ?? "");
 
-      // Break up long responses into conversational chunks
       const chunks = breakIntoChunks(responseText);
       return chunks[0] || responseText;
     }
     
-    // Execute the next batch of tool calls
+    // Execute the next batch of tool calls via unified executeTool
     const nextToolMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
     
     for (const toolCall of nextMsg.tool_calls) {
@@ -508,84 +739,11 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
         parsedArgs = {};
       }
 
-      const handler = overriddenHandlers[toolName];
-
-      if (!handler) {
-        console.warn("[agent] No handler found for tool", { toolName, toolCallId: fnCall.id });
-        nextToolMessages.push({
-          role: "tool",
-          tool_call_id: fnCall.id,
-          content: `Tool handler not implemented for ${toolName}.`,
-        });
-        continue;
-      }
-
-      try {
-        console.log("[agent] Executing tool (iteration " + iteration + ")", {
-          toolName,
-          toolCallId: fnCall.id,
-          rawArgs,
-          parsedArgs,
-        });
-        // Auto-inject cached formattedHtml for create_document
-        if (toolName === 'create_document' && lastFormattedHtml && parsedArgs.content === 'USE_FORMATTED_HTML') {
-          parsedArgs.content = lastFormattedHtml;
-          console.log(`[agent] Auto-injected cached formattedHtml (${lastFormattedHtml.length} chars) into create_document`);
-        }
-        const result = await handler(parsedArgs);
-        const formatted = formatToolResult(toolName, result);
-        const stripped = stripHtmlFromToolResult(formatted);
-        const truncated = truncateToolResult(stripped, toolName);
-
-        console.log("[agent] Tool execution succeeded", {
-          toolName,
-          toolCallId: fnCall.id,
-          resultSize: JSON.stringify(formatted).length,
-        });
-
-        // Record tool execution metrics
-        const startTime = Date.now();
-        recordToolExecution(toolName, true, Date.now() - startTime).catch(err => 
-          console.error("[Memory] Failed to record tool metric:", err)
-        );
-
-        nextToolMessages.push({
-          role: "tool",
-          tool_call_id: fnCall.id,
-          content: JSON.stringify({
-            type: "tool_result",
-            tool: toolName,
-            result: truncated,
-          }),
-        });
-      } catch (err) {
-        const errText = err instanceof Error ? err.message : String(err);
-
-        console.error("[agent] Tool execution failed", {
-          toolName,
-          toolCallId: fnCall.id,
-          error: errText,
-        });
-
-        // Record failed tool execution
-        recordToolExecution(toolName, false, 0).catch(err => 
-          console.error("[Memory] Failed to record tool metric:", err)
-        );
-
-        nextToolMessages.push({
-          role: "tool",
-          tool_call_id: fnCall.id,
-          content: JSON.stringify({
-            type: "tool_result",
-            tool: toolName,
-            success: false,
-            error: errText,
-          }),
-        });
-      }
+      console.log("[agent] Executing tool (iteration " + iteration + ")", { toolName, toolCallId: fnCall.id, parsedArgs });
+      const { toolMessage } = await executeTool(toolName, parsedArgs, fnCall.id, wm);
+      nextToolMessages.push(toolMessage);
     }
     
-    // Add the assistant message and tool results to conversation
     conversationMessages = [...conversationMessages, nextMsg, ...nextToolMessages];
   }
   
@@ -594,7 +752,7 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
   try {
     const compressedForSummary = compressConversationMessages(conversationMessages);
     const summaryCall = await openai.chat.completions.create({
-      model: AGENT_MODEL,
+      model: FINAL_MODEL,
       messages: [
         ...compressedForSummary,
         { role: "user", content: "Please summarize the results from the tools you've already used. Do not call any more tools." }
@@ -609,6 +767,20 @@ export async function handleQuery(history: OpenAI.Chat.ChatCompletionMessagePara
     console.error("[agent] Summary call failed:", summaryErr);
     return "I've completed the available steps, but the task may require additional actions.";
   }
+}
+
+// Convert toolResults from executeTool into ToolAction[] for episodic memory
+function toToolActions(toolResults: any[]): ToolAction[] {
+  return toolResults.map(tr => ({
+    toolName: tr.toolName,
+    inputArgs: tr.inputArgs || {},
+    outputSummary: tr.decision || (tr.success ? "success" : `failed: ${tr.error}`),
+    success: tr.success,
+    executionTime: tr.executionTime || 0,
+    cached: tr.cached || false,
+    decision: tr.decision || "",
+    dataKeys: [],
+  }));
 }
 
 // New function for streaming conversational responses with memory integration
@@ -628,10 +800,32 @@ export async function handleQueryStreaming(
   const startTime = Date.now();
   const userQuery = history[history.length - 1]?.content as string || "";
   
-  // Load relevant strategies from memory
+  // Get session-scoped memories (persist across queries in same session)
+  const wm = getWorkingMemory(sessionId);
+  const em = getEpisodicMemory(sessionId);
+  const wt = getWorkflowTemplates(sessionId);
+  const prefs = getUserPreferencesStore();
+  wm.prune(); // Remove expired/stale entries
+  
+  // Extract user preferences from the message (async, non-blocking)
+  prefs.extractFromMessage(userQuery, sessionId).catch(err =>
+    console.error("[Memory] Failed to extract preferences:", err)
+  );
+
+  // Learn workflow templates from accumulated episodes
+  wt.learnFromEpisodes(em);
+
+  // Detect if this is a correction of a previous episode
+  const correctedEpisode = em.detectCorrection(userQuery);
+  if (correctedEpisode) {
+    em.addFeedback(userQuery);
+    console.log(`[agent] Detected correction of episode ${correctedEpisode.id}`);
+  }
+  
+  // Load relevant strategies from memory (L3: Semantic Memory)
   let strategies: any[] = [];
   let strategyIds: string[] = [];
-  let enhancedPrompt = SYSTEM_PROMPT;
+  let strategiesText = "";
   
   try {
     strategies = await selectStrategiesWithDynamicBudget(userQuery, {
@@ -641,23 +835,25 @@ export async function handleQueryStreaming(
     });
     
     strategyIds = getStrategyIds(strategies);
-    const strategiesText = formatStrategiesForPrompt(strategies);
-    
-    if (strategiesText) {
-      enhancedPrompt = `${SYSTEM_PROMPT}
-
-═══════════════════════════════════════════════════════════
-LEARNED OPERATIONAL STRATEGIES (From ${strategies.length} past interactions):
-${strategiesText}
-
-Apply these learned strategies when relevant. You can reference that you've learned 
-these patterns from experience and acknowledge your growing expertise.
-═══════════════════════════════════════════════════════════`;
-      console.log(`[Memory] Injected ${strategies.length} strategies into prompt`);
-    }
+    strategiesText = formatStrategiesForPrompt(strategies);
   } catch (error) {
     console.error("[Memory] Failed to load strategies:", error);
-    // Continue without strategies if memory system fails
+  }
+
+  // Assemble all memory levels into system prompt via Context Assembler
+  const { systemPrompt: enhancedPrompt, totalInjectedChars } = await assembleContext(
+    SYSTEM_PROMPT,
+    userQuery,
+    wm,
+    em,
+    strategies,
+    strategiesText,
+    prefs,
+    wt
+  );
+
+  if (totalInjectedChars > 0) {
+    console.log(`[Memory] Context assembled: ${totalInjectedChars} chars injected (WM=${wm.size}, EP=${em.size}, STRAT=${strategies.length}, PREF=${prefs.size}, WF=${wt.size})`);
   }
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -667,7 +863,7 @@ these patterns from experience and acknowledge your growing expertise.
 
   // First call: let the model decide whether to use tools
   const first = await openai.chat.completions.create({
-    model: AGENT_MODEL,
+    model: TOOL_MODEL,
     messages,
     tools: aeroTools,
     tool_choice: "auto",
@@ -682,8 +878,11 @@ these patterns from experience and acknowledge your growing expertise.
     const responseText = typeof content === "string" ? content : JSON.stringify(content ?? "");
     const chunks = breakIntoChunks(responseText);
     
-    // Log non-tool interactions (async, don't block response)
     const responseTime = Date.now() - startTime;
+
+    // Record episode (no tools used)
+    em.record(userQuery, [], responseTime);
+
     logInteraction({
       sessionId,
       userMessage: userQuery,
@@ -706,15 +905,13 @@ these patterns from experience and acknowledge your growing expertise.
     };
   }
 
-  // Execute each requested tool call
+  // Execute each requested tool call via unified executeTool
   const toolMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
   const toolsUsed: string[] = [];
   const toolResults: any[] = [];
 
   for (const toolCall of msg.tool_calls) {
-    // Access as any so we can read `.function` without fighting SDK typings
     const fnCall = toolCall as any;
-
     const toolName = fnCall.function?.name as string;
     const rawArgs = fnCall.function?.arguments as string | undefined;
 
@@ -725,112 +922,16 @@ these patterns from experience and acknowledge your growing expertise.
       parsedArgs = {};
     }
 
-    // Inject fileUpload data for upload_document tool
-    if (toolName === 'upload_document' && fileUpload) {
-      parsedArgs.base64Content = fileUpload.base64Content;
-      parsedArgs.fileName = fileUpload.fileName;
-      parsedArgs.mimeType = fileUpload.mimeType;
-      console.log("[agent] Injected fileUpload data into upload_document tool");
-    }
-
-    const handler = overriddenHandlers[toolName];
-
-    if (!handler) {
-      console.warn("[agent] No handler found for tool", { toolName, toolCallId: fnCall.id });
-      toolMessages.push({
-        role: "tool",
-        tool_call_id: fnCall.id,
-        content: `Tool handler not implemented for ${toolName}.`,
-      });
-      continue;
-    }
-
-    try {
-      console.log("[agent] Executing tool", {
-        toolName,
-        toolCallId: fnCall.id,
-        rawArgs,
-        parsedArgs,
-      });
-      // Auto-inject cached formattedHtml for create_document
-      if (toolName === 'create_document' && lastFormattedHtml && parsedArgs.content === 'USE_FORMATTED_HTML') {
-        parsedArgs.content = lastFormattedHtml;
-        console.log(`[agent] Auto-injected cached formattedHtml (${lastFormattedHtml.length} chars) into create_document`);
-      }
-      
-      const toolStartTime = Date.now();
-      const result = await handler(parsedArgs);
-      const toolExecutionTime = Date.now() - toolStartTime;
-      const formatted = formatToolResult(toolName, result);
-      const stripped = stripHtmlFromToolResult(formatted);
-      const truncated = truncateToolResult(stripped, toolName);
-
-      console.log("[agent] Tool execution succeeded", {
-        toolName,
-        toolCallId: fnCall.id,
-        resultSize: JSON.stringify(formatted).length,
-      });
-      
-      toolsUsed.push(toolName);
-      toolResults.push({
-        toolName,
-        success: true,
-        result: result,
-        executionTime: toolExecutionTime
-      });
-      
-      // Record tool metrics (async, don't block)
-      recordToolExecution(toolName, true, toolExecutionTime).catch(err => 
-        console.error("[Memory] Failed to record tool metric:", err)
-      );
-
-      toolMessages.push({
-        role: "tool",
-        tool_call_id: fnCall.id,
-        content: JSON.stringify({
-          type: "tool_result",
-          tool: toolName,
-          result: truncated,
-        }),
-      });
-    } catch (err) {
-      const errText = err instanceof Error ? err.message : String(err);
-
-      console.error("[agent] Tool execution failed", {
-        toolName,
-        toolCallId: fnCall.id,
-        error: errText,
-      });
-      
-      toolsUsed.push(toolName);
-      toolResults.push({
-        toolName,
-        success: false,
-        error: errText,
-        executionTime: 0
-      });
-      
-      // Record tool failure (async, don't block)
-      recordToolExecution(toolName, false, 0, errText).catch(err => 
-        console.error("[Memory] Failed to record tool metric:", err)
-      );
-
-      toolMessages.push({
-        role: "tool",
-        tool_call_id: fnCall.id,
-        content: JSON.stringify({
-          type: "tool_result",
-          tool: toolName,
-          success: false,
-          error: errText,
-        }),
-      });
-    }
+    console.log("[agent] Executing tool", { toolName, toolCallId: fnCall.id, parsedArgs });
+    const { toolMessage, toolUsed, toolResult } = await executeTool(toolName, parsedArgs, fnCall.id, wm, fileUpload);
+    toolMessages.push(toolMessage);
+    toolsUsed.push(toolUsed);
+    toolResults.push(toolResult);
   }
 
   // Continue calling the model until no more tool calls (multi-step task support)
   let conversationMessages = [...messages, msg, ...toolMessages];
-  let maxIterations = 15; // Allow enough room for complex multi-tool workflows
+  let maxIterations = 20;
   let iteration = 0;
   
   while (iteration < maxIterations) {
@@ -838,10 +939,10 @@ these patterns from experience and acknowledge your growing expertise.
     
     // Compress older tool results if context is getting too large
     conversationMessages = compressConversationMessages(conversationMessages);
-    console.log(`[agent] Iteration ${iteration}, messages: ${conversationMessages.length}, tools used so far: [${toolsUsed.join(', ')}]`);
+    console.log(`[agent] Iteration ${iteration}, messages: ${conversationMessages.length}, tools used so far: [${toolsUsed.join(', ')}], WM entries: ${wm.size}`);
     
     const nextCall = await openai.chat.completions.create({
-      model: AGENT_MODEL,
+      model: TOOL_MODEL,
       messages: conversationMessages,
       tools: aeroTools,
       tool_choice: "auto",
@@ -857,11 +958,12 @@ these patterns from experience and acknowledge your growing expertise.
         ? finalContent
         : JSON.stringify(finalContent ?? "");
       
-      // Break and return response
       const chunks = breakIntoChunks(responseText);
       const responseTime = Date.now() - startTime;
+
+      // Record episode with all tool actions
+      em.record(userQuery, toToolActions(toolResults), responseTime);
       
-      // Log interaction (async)
       logInteraction({
         sessionId,
         userMessage: userQuery,
@@ -885,7 +987,7 @@ these patterns from experience and acknowledge your growing expertise.
       };
     }
     
-    // Execute the next batch of tool calls
+    // Execute the next batch of tool calls via unified executeTool
     const nextToolMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
     
     for (const toolCall of nextMsg.tool_calls) {
@@ -900,113 +1002,24 @@ these patterns from experience and acknowledge your growing expertise.
         parsedArgs = {};
       }
 
-      const handler = overriddenHandlers[toolName];
-
-      if (!handler) {
-        console.warn("[agent] No handler found for tool", { toolName, toolCallId: fnCall.id });
-        nextToolMessages.push({
-          role: "tool",
-          tool_call_id: fnCall.id,
-          content: `Tool handler not implemented for ${toolName}.`,
-        });
-        continue;
-      }
-
-      try {
-        console.log("[agent] Executing tool (iteration " + iteration + ")", {
-          toolName,
-          toolCallId: fnCall.id,
-          rawArgs,
-          parsedArgs,
-        });
-        // Auto-inject cached formattedHtml for create_document
-        if (toolName === 'create_document' && lastFormattedHtml && parsedArgs.content === 'USE_FORMATTED_HTML') {
-          parsedArgs.content = lastFormattedHtml;
-          console.log(`[agent] Auto-injected cached formattedHtml (${lastFormattedHtml.length} chars) into create_document`);
-        }
-        
-        const toolStartTime = Date.now();
-        const result = await handler(parsedArgs);
-        const toolExecutionTime = Date.now() - toolStartTime;
-        const formatted = formatToolResult(toolName, result);
-        const stripped = stripHtmlFromToolResult(formatted);
-        const truncated = truncateToolResult(stripped, toolName);
-
-        console.log("[agent] Tool execution succeeded", {
-          toolName,
-          toolCallId: fnCall.id,
-          resultSize: JSON.stringify(formatted).length,
-          truncatedSize: JSON.stringify(truncated).length,
-        });
-
-        toolsUsed.push(toolName);
-        toolResults.push({
-          toolName,
-          success: true,
-          result: result,
-          executionTime: toolExecutionTime
-        });
-        
-        recordToolExecution(toolName, true, toolExecutionTime).catch(err => 
-          console.error("[Memory] Failed to record tool metric:", err)
-        );
-
-        nextToolMessages.push({
-          role: "tool",
-          tool_call_id: fnCall.id,
-          content: JSON.stringify({
-            type: "tool_result",
-            tool: toolName,
-            result: truncated,
-          }),
-        });
-      } catch (err) {
-        const errText = err instanceof Error ? err.message : String(err);
-
-        console.error("[agent] Tool execution failed", {
-          toolName,
-          toolCallId: fnCall.id,
-          error: errText,
-        });
-
-        toolsUsed.push(toolName);
-        toolResults.push({
-          toolName,
-          success: false,
-          error: errText,
-          executionTime: 0
-        });
-        
-        recordToolExecution(toolName, false, 0, errText).catch(err => 
-          console.error("[Memory] Failed to record tool metric:", err)
-        );
-
-        nextToolMessages.push({
-          role: "tool",
-          tool_call_id: fnCall.id,
-          content: JSON.stringify({
-            type: "tool_result",
-            tool: toolName,
-            success: false,
-            error: errText,
-          }),
-        });
-      }
+      console.log("[agent] Executing tool (iteration " + iteration + ")", { toolName, toolCallId: fnCall.id, parsedArgs });
+      const { toolMessage, toolUsed, toolResult } = await executeTool(toolName, parsedArgs, fnCall.id, wm, fileUpload);
+      nextToolMessages.push(toolMessage);
+      toolsUsed.push(toolUsed);
+      toolResults.push(toolResult);
     }
     
     conversationMessages = [...conversationMessages, nextMsg, ...nextToolMessages];
   }
   
-  // If we hit max iterations, force a final summary instead of returning generic message
+  // If we hit max iterations, force a final summary
   console.warn("[agent] Hit max iterations for multi-step task, forcing summary");
   
   let responseText: string;
   try {
-    // Compress before summary call to avoid context overflow
     const compressedForSummary = compressConversationMessages(conversationMessages);
-    // Force the model to summarize what was accomplished (no more tool calls)
     const summaryCall = await openai.chat.completions.create({
-      model: AGENT_MODEL,
+      model: FINAL_MODEL,
       messages: [
         ...compressedForSummary,
         { role: "user", content: "Please summarize the results from the tools you've already used. Do not call any more tools." }
@@ -1027,6 +1040,10 @@ these patterns from experience and acknowledge your growing expertise.
   const chunks = breakIntoChunks(responseText);
   
   const responseTime = Date.now() - startTime;
+
+  // Record episode (max iterations path)
+  em.record(userQuery, toToolActions(toolResults), responseTime);
+
   logInteraction({
     sessionId,
     userMessage: userQuery,

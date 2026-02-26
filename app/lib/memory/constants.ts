@@ -6,7 +6,8 @@ export const TABLE_NAMES = {
   STRATEGIES: process.env.DYNAMODB_STRATEGIES_TABLE || "AgentStrategies",
   TOOL_METRICS: process.env.DYNAMODB_TOOL_METRICS_TABLE || "ToolMetrics",
   CONFLICTS: process.env.DYNAMODB_CONFLICTS_TABLE || "StrategyConflicts",
-  KNOWLEDGE_GAPS: process.env.DYNAMODB_KNOWLEDGE_GAPS_TABLE || "KnowledgeGaps"
+  KNOWLEDGE_GAPS: process.env.DYNAMODB_KNOWLEDGE_GAPS_TABLE || "KnowledgeGaps",
+  USER_PREFERENCES: process.env.DYNAMODB_USER_PREFERENCES_TABLE || "UserPreferences"
 };
 
 // Outcome weights for confidence updates
